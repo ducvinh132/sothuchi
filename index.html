@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#2e7d32">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Sổ Thu Chi">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+  <title>Sổ Thu Chi</title>
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <button id="back" class="tbtn" hidden>‹ Quay lại</button>
+      <h1 id="title"></h1>
+      <div id="actions"></div>
+    </header>
+    <main id="view"></main>
+    <nav id="tabs">
+      <button data-tab="tx"><span>🧾</span>Giao dịch</button>
+      <button data-tab="wallets"><span>👛</span>Ví</button>
+      <button data-tab="budgets"><span>🎯</span>Ngân sách</button>
+      <button data-tab="reports"><span>📊</span>Báo cáo</button>
+      <button data-tab="more"><span>⋯</span>Khác</button>
+    </nav>
+  </div>
+
+  <div id="sheet-backdrop" hidden>
+    <div id="sheet" role="dialog" aria-modal="true">
+      <div class="sheet-head">
+        <button id="sheet-cancel" class="tbtn">Hủy</button>
+        <h2 id="sheet-title"></h2>
+        <button id="sheet-save" class="tbtn strong">Lưu</button>
+      </div>
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="lock" hidden>
+    <div class="lock-box">
+      <div class="lock-logo">🔐</div>
+      <h2>Sổ Thu Chi</h2>
+      <p id="lock-msg">Nhập mã PIN</p>
+      <div id="dots"></div>
+      <div id="keypad"></div>
+      <button id="forgot" class="linkbtn">Quên mã PIN?</button>
+    </div>
+  </div>
+
+  <input type="file" id="file-in" hidden>
+  <div id="toast" role="status"></div>
+
+  <script src="js/store.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
