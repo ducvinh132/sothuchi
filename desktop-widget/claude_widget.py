@@ -307,13 +307,24 @@ def diagnose() -> None:
             print(f"{len(data)} byte, BOM={bom}")
             try:
                 obj = json.loads(data.decode("utf-8-sig"))
-                print(json.dumps(_skeleton(obj), ensure_ascii=False, indent=1)[:2500])
+                print("   Các khóa cấp 1:", ", ".join(obj.keys()) if isinstance(obj, dict) else type(obj).__name__)
             except ValueError as e:
                 print("   Không phải JSON hợp lệ:", e, "| 12 byte đầu:", data[:12])
         except OSError as e:
             print("lỗi đọc:", e)
+    try:
+        with open(os.path.join(claude_dir(), ".credentials.json"), encoding="utf-8-sig") as f:
+            o = json.load(f).get("claudeAiOauth")
+        st = ("KHÔNG CÓ (Claude Code chưa đăng nhập tài khoản trên máy này)" if not isinstance(o, dict) else
+              "có nhưng accessToken rỗng (đã đăng xuất/hết phiên)" if not o.get("accessToken") else "có token")
+    except (OSError, ValueError, AttributeError):
+        st = "không đọc được"
+    print("\n[Tài khoản Claude trong .credentials.json] claudeAiOauth:", st)
+    print("[Claude Code CLI]", find_claude_cli() or "KHÔNG tìm thấy lệnh 'claude' (cần cài Claude Code CLI)")
+    pk = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", "*Claude*"))
     desk = os.path.join(os.environ.get("APPDATA", ""), "Claude")
-    print(f"\n[Claude Desktop] {desk}:", "có" if os.path.isdir(desk) else "không có")
+    print("[Claude Desktop]", "bản Store/MSIX: " + ", ".join(os.path.basename(x) for x in pk) if pk else
+          ("bản thường: " + desk if os.path.isdir(desk) else "không thấy"))
     cred, src = read_credentials()
     if cred:
         exp = cred.get("expiresAt")
@@ -325,16 +336,57 @@ def diagnose() -> None:
         print("\n=> Không tìm thấy token OAuth. Hãy chụp toàn bộ màn hình này gửi hỗ trợ.")
 
 
+def find_claude_cli() -> str | None:
+    import shutil
+    for name in ("claude", "claude.exe", "claude.cmd"):
+        p = shutil.which(name)
+        if p:
+            return p
+    home = os.path.expanduser("~")
+    for p in (os.path.join(home, ".local", "bin", "claude.exe"),
+              os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+_last_refresh = [0.0]
+
+
+def refresh_via_cli() -> dict | None:
+    """Token sắp/đã hết hạn: gọi 'claude auth status' (ẩn) để Claude Code tự làm mới
+    và tự lưu token theo cách của nó, rồi đọc lại. Widget không tự ghi token.
+    Tối đa 1 lần / 10 phút."""
+    if time.time() - _last_refresh[0] < 600:
+        return None
+    _last_refresh[0] = time.time()
+    exe = find_claude_cli()
+    if not exe:
+        return None
+    import subprocess
+    try:
+        subprocess.run([exe, "auth", "status"], capture_output=True, timeout=90,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    cred, _ = read_credentials()
+    return cred
+
+
 def fetch_plan_usage() -> dict:
     """Trả về {'plan': str, 'limits': [(key, label, pct, resets_at)], 'error': str|None}."""
     cred, _src = read_credentials()
     if not cred or not cred.get("accessToken"):
-        return {"plan": "", "limits": [], "error": "Không tìm thấy token Claude Code (đăng nhập bằng tài khoản "
-                "Pro/Max qua lệnh /login; chẩn đoán: chạy diagnose.bat)"}
-    plan = (cred.get("subscriptionType") or "").capitalize()
+        return {"plan": "", "limits": [], "error": "Chưa có token tài khoản Claude. Mở Terminal, chạy: "
+                "claude auth login (chi tiết: login.bat / diagnose.bat)"}
     exp = cred.get("expiresAt")
+    if exp and exp / 1000 < time.time() + 60:
+        cred = refresh_via_cli() or cred
+        exp = cred.get("expiresAt")
+    plan = (cred.get("subscriptionType") or "").capitalize()
     if exp and exp / 1000 < time.time():
-        return {"plan": plan, "limits": [], "error": "Token hết hạn – mở Claude Code 1 lần để làm mới"}
+        return {"plan": plan, "limits": [], "error": "Token hết hạn và chưa tự làm mới được – "
+                "mở Terminal chạy 'claude' 1 lần"}
 
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {cred['accessToken']}",
