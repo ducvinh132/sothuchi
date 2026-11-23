@@ -335,6 +335,17 @@ def diagnose() -> None:
                     print(f"   {sub}\\Claude:", ", ".join(sorted(os.listdir(cd))[:25]))
     print("[Claude Desktop]", "bản Store/MSIX: " + ", ".join(os.path.basename(x) for x in pk) if pk else
           ("bản thường: " + desk if os.path.isdir(desk) else "không thấy"))
+    print("\n[Log Claude Code] các thư mục quét:")
+    for root, files in find_log_files(log_roots()).items():
+        newest = max(files, key=os.path.getmtime, default=None)
+        nt = datetime.fromtimestamp(os.path.getmtime(newest)).strftime("%d/%m %H:%M") if newest else "-"
+        print(f"   {root}: {len(files)} file .jsonl, sửa gần nhất {nt}")
+        if newest:
+            print("      ", newest)
+    sc = LogScanner()
+    st = sc.scan()
+    print(f"   => hôm nay {st['today_tok']:,} token, {st['today_msgs']} lượt; lượt cuối:",
+          st["last_entry"].astimezone().strftime("%d/%m %H:%M") if st["last_entry"] else "-")
     cred, src = read_credentials()
     if cred:
         exp = cred.get("expiresAt")
@@ -552,8 +563,47 @@ def fetch_plan_usage() -> dict:
 # ----------------------------------------------------------------------------
 # 2. Token từ log Claude Code (đọc tăng dần, chống trùng)
 # ----------------------------------------------------------------------------
+SKIP_DIRS = {"cache", "code cache", "gpucache", "dawncache", "dawnwebgpucache", "blob_storage", "crashpad",
+             "node_modules", "indexeddb", "service worker", "shared_proto_db", "vm_bundles", "logs",
+             "local storage", "session storage", "webstorage", "git", ".git"}
+
+
+def log_roots() -> list[str]:
+    """Nơi Claude Code ghi log hội thoại (*.jsonl): CLI và Claude Code chạy trong Claude Desktop/Cowork
+    (bản thường %APPDATA%\\Claude, bản Store ảo hóa trong %LOCALAPPDATA%\\Packages\\Claude_*)."""
+    home = os.path.expanduser("~")
+    appdata, local = os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")
+    roots = [os.path.join(claude_dir(), "projects"), os.path.join(home, ".claude", "projects")]
+    if appdata:
+        roots.append(os.path.join(appdata, "Claude"))
+    if local:
+        roots.append(os.path.join(local, "Claude"))
+        for pkg in glob.glob(os.path.join(local, "Packages", "Claude_*")):
+            roots.append(os.path.join(pkg, "LocalCache"))
+    out = []
+    for r in roots:
+        r = os.path.normcase(os.path.abspath(r))
+        if os.path.isdir(r) and r not in out:
+            out.append(r)
+    return out
+
+
+def find_log_files(roots: list[str]) -> dict[str, list[str]]:
+    res: dict[str, list[str]] = {}
+    for root in roots:
+        files = []
+        for dp, dns, fns in os.walk(root):
+            dns[:] = [d for d in dns if d.lower() not in SKIP_DIRS]
+            files += [os.path.join(dp, f) for f in fns if f.endswith(".jsonl")]
+        res[root] = files
+    return res
+
+
 class LogScanner:
     def __init__(self) -> None:
+        self.files: list[str] = []
+        self.walked_at = 0.0
+        self.sources: dict[str, list[str]] = {}
         self.offsets: dict[str, int] = {}
         self.seen: set[str] = set()
         self.entries: deque = deque()  # (datetime_utc, model, in, out, cache_w, cache_r)
@@ -583,9 +633,21 @@ class LogScanner:
 
     def scan(self) -> dict:
         cutoff_mtime = time.time() - 2 * 86400
-        for path in glob.glob(os.path.join(claude_dir(), "projects", "**", "*.jsonl"), recursive=True):
+        if time.time() - self.walked_at > 300 or not self.files:  # quét lại cây thư mục mỗi 5 phút
+            self.sources = find_log_files(log_roots())
+            seen_real, self.files = set(), []
+            for fl in self.sources.values():
+                for f in fl:
+                    rp = os.path.normcase(os.path.realpath(f))
+                    if rp not in seen_real:
+                        seen_real.add(rp)
+                        self.files.append(f)
+            self.walked_at = time.time()
+        newest = 0.0
+        for path in self.files:
             try:
                 size = os.path.getsize(path)
+                newest = max(newest, os.path.getmtime(path))
                 if self.first and path not in self.offsets and os.path.getmtime(path) < cutoff_mtime:
                     self.offsets[path] = size  # file cũ: bỏ qua nội dung, chỉ theo dõi phần ghi thêm
                     continue
@@ -613,7 +675,9 @@ class LogScanner:
             self.entries.popleft()
         today = datetime.now().astimezone().date()
         t5 = now - timedelta(hours=5)
-        res = {"today_tok": 0, "today_msgs": 0, "h5_tok": 0, "today_out": 0, "models": {}}
+        res = {"today_tok": 0, "today_msgs": 0, "h5_tok": 0, "today_out": 0, "models": {},
+               "files": len(self.files), "newest": newest,
+               "last_entry": max((e[0] for e in self.entries), default=None)}
         for ts, model, i, o, cw, cr in self.entries:
             total = i + o + cw + cr
             if ts >= t5:
@@ -736,7 +800,8 @@ class Widget:
         self._lbl(self.plan_box, "Đang tải giới hạn gói…", 8, "muted").pack(anchor="w")
 
         tk.Frame(f, bg=C["track"], height=px(1)).pack(fill="x", pady=px(8))
-        self._lbl(f, "CLAUDE CODE (log máy này)", 7, "muted", bold=True).pack(anchor="w")
+        self.log_head = self._lbl(f, "CLAUDE CODE (log máy này)", 7, "muted", bold=True)
+        self.log_head.pack(anchor="w")
         self.log_lbl = self._lbl(f, "Đang quét log…", 9, justify="left")
         self.log_lbl.pack(anchor="w", pady=(px(2), 0))
         self.model_lbl = self._lbl(f, "", 8, "muted")
@@ -780,6 +845,9 @@ class Widget:
         self._fit()
 
     def _render_log(self, s: dict) -> None:
+        last = s.get("last_entry")
+        last_txt = f" · lượt cuối {last.astimezone():%H:%M}" if last else ""
+        self.log_head.config(text=f"CLAUDE CODE (log máy này · {s.get('files', 0)} file{last_txt})")
         self.log_lbl.config(text=f"Hôm nay: {fmt_tok(s['today_tok'])} token · {s['today_msgs']} lượt"
                                  f" · out {fmt_tok(s['today_out'])}\n"
                                  f"5 giờ qua: {fmt_tok(s['h5_tok'])} token")
