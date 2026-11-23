@@ -320,9 +320,19 @@ def diagnose() -> None:
     except (OSError, ValueError, AttributeError):
         st = "không đọc được"
     print("\n[Tài khoản Claude trong .credentials.json] claudeAiOauth:", st)
-    print("[Claude Code CLI]", find_claude_cli() or "KHÔNG tìm thấy lệnh 'claude' (cần cài Claude Code CLI)")
+    print("[Claude Code CLI] ứng viên:", cli_candidates() or "không có")
+    print("[Claude Code CLI] dùng:", find_claude_cli() or "KHÔNG tìm thấy (chạy login.bat)")
     pk = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", "*Claude*"))
     desk = os.path.join(os.environ.get("APPDATA", ""), "Claude")
+    for pkgdir in pk:
+        lc = os.path.join(pkgdir, "LocalCache")
+        for sub in ("Roaming", "Local"):
+            d = os.path.join(lc, sub)
+            if os.path.isdir(d):
+                print(f"   {sub}:", ", ".join(sorted(os.listdir(d))[:15]))
+                cd = os.path.join(d, "Claude")
+                if os.path.isdir(cd):
+                    print(f"   {sub}\\Claude:", ", ".join(sorted(os.listdir(cd))[:25]))
     print("[Claude Desktop]", "bản Store/MSIX: " + ", ".join(os.path.basename(x) for x in pk) if pk else
           ("bản thường: " + desk if os.path.isdir(desk) else "không thấy"))
     cred, src = read_credentials()
@@ -336,18 +346,73 @@ def diagnose() -> None:
         print("\n=> Không tìm thấy token OAuth. Hãy chụp toàn bộ màn hình này gửi hỗ trợ.")
 
 
-def find_claude_cli() -> str | None:
+def _is_claude_code(exe: str) -> bool:
+    """Xác nhận file thực thi là Claude Code CLI (không phải app Electron Claude Desktop)."""
+    import subprocess
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return "claude code" in (r.stdout + r.stderr).lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+_cli_cache: list = []
+
+
+def cli_candidates() -> list[str]:
+    """Các vị trí có thể có Claude Code CLI, kể cả bản kèm trong Claude Desktop (thường/Store)."""
     import shutil
-    for name in ("claude", "claude.exe", "claude.cmd"):
-        p = shutil.which(name)
-        if p:
-            return p
     home = os.path.expanduser("~")
-    for p in (os.path.join(home, ".local", "bin", "claude.exe"),
-              os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")):
-        if os.path.isfile(p):
-            return p
+    appdata, local = os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")
+    c = [shutil.which(n) for n in ("claude", "claude.exe", "claude.cmd")]
+    c += [os.path.join(home, ".local", "bin", "claude.exe"), os.path.join(appdata, "npm", "claude.cmd")]
+    # Claude Code kèm theo Claude Desktop: bản thường và bản Microsoft Store (MSIX ảo hóa AppData)
+    roots = [os.path.join(appdata, "Claude"), os.path.join(local, "Claude")]
+    for pkg in glob.glob(os.path.join(local, "Packages", "Claude_*")):
+        roots += [os.path.join(pkg, "LocalCache", "Roaming", "Claude"),
+                  os.path.join(pkg, "LocalCache", "Local", "Claude")]
+    found = []
+    for r in roots:
+        if os.path.isdir(r):
+            found += glob.glob(os.path.join(r, "**", "claude.exe"), recursive=True)
+    found.sort(key=lambda f: os.path.getmtime(f), reverse=True)  # bản mới nhất trước
+    out = []
+    for f in c + found:
+        if f and os.path.isfile(f) and f not in out:
+            out.append(f)
+    return out
+
+
+def find_claude_cli() -> str | None:
+    if _cli_cache:
+        return _cli_cache[0]
+    for exe in cli_candidates():
+        if _is_claude_code(exe):
+            _cli_cache.append(exe)
+            return exe
     return None
+
+
+def login() -> None:
+    """Đăng nhập Claude Code bằng tài khoản Pro/Max để widget đọc được usage."""
+    import subprocess
+    exe = find_claude_cli()
+    if not exe:
+        print("Không thấy Claude Code CLI (kể cả bản kèm Claude Desktop). Cài bằng trình cài chính thức...")
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                            "irm https://claude.ai/install.ps1 | iex"])
+        print("Mã kết thúc trình cài:", r.returncode)
+        _cli_cache.clear()
+        exe = find_claude_cli()
+    if not exe:
+        print("\nVẫn chưa có Claude Code CLI. Cách cài thủ công: mở PowerShell, chạy\n"
+              "   irm https://claude.ai/install.ps1 | iex\n"
+              "(nếu máy công ty chặn script, nhờ IT hoặc dùng: npm install -g @anthropic-ai/claude-code)")
+        return
+    print("Dùng Claude Code tại:", exe)
+    print("Trình duyệt sẽ mở trang đăng nhập. Chọn tài khoản Claude Pro/Max, đồng ý cấp quyền.\n")
+    subprocess.run([exe, "auth", "login", "--claudeai"])
 
 
 _last_refresh = [0.0]
@@ -798,6 +863,10 @@ def uninstall_startup() -> None:
 
 if __name__ == "__main__":
     if "--diagnose" in sys.argv:
+        diagnose()
+    elif "--login" in sys.argv:
+        login()
+        print("\n===== Kiểm tra lại =====")
         diagnose()
     elif "--install-startup" in sys.argv:
         install_startup()

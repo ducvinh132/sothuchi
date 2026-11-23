@@ -12,7 +12,7 @@ Thanh % đổi màu: xanh < 60%, vàng 60–85%, đỏ ≥ 85%.
 
 ## Yêu cầu
 1. Python 3.9+ cho Windows (https://www.python.org/downloads/windows/), khi cài tích **Add python.exe to PATH**.
-2. **Claude Code CLI** đã đăng nhập bằng tài khoản Pro/Max: chạy `login.bat` (tự cài CLI bằng trình cài chính thức nếu thiếu, rồi chạy `claude auth login --claudeai`). Lưu ý: dùng Claude Code bên trong ứng dụng Claude Desktop/Cowork **không** lưu token cho widget; phải đăng nhập CLI một lần. Khi token hết hạn, widget tự gọi ẩn `claude auth status` để Claude Code làm mới (tối đa 1 lần/10 phút). Widget tự tìm token theo thứ tự: **Windows Credential Manager** (nơi Claude Code bản mới lưu, mục `Claude Code-credentials`), sau đó file `%USERPROFILE%\.claude\.credentials.json` (bản cũ).
+2. **Claude Code CLI** đã đăng nhập bằng tài khoản Pro/Max: chạy `login.bat`: tự tìm Claude Code (kể cả bản kèm trong Claude Desktop bản thường hoặc Microsoft Store), nếu không có thì cài bằng trình cài chính thức, rồi chạy `claude auth login --claudeai`. Lưu ý: dùng Claude Code bên trong ứng dụng Claude Desktop/Cowork **không** lưu token cho widget; phải đăng nhập CLI một lần. Khi token hết hạn, widget tự gọi ẩn `claude auth status` để Claude Code làm mới (tối đa 1 lần/10 phút). Widget tự tìm token theo thứ tự: **Windows Credential Manager** (nơi Claude Code bản mới lưu, mục `Claude Code-credentials`), sau đó file `%USERPROFILE%\.claude\.credentials.json` (bản cũ).
 
 ## Cài đặt
 1. Tải thư mục `desktop-widget` về máy (ví dụ `D:\Tools\desktop-widget`).
