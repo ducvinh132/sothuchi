@@ -118,8 +118,12 @@ CRED_SERVICE_HINT = "Claude Code"
 CRED_USER = "claude-code-user"
 
 
-def _wincred_enumerate(filter_: str) -> dict[str, bytes]:
-    """Đọc các mục Generic trong Windows Credential Manager khớp bộ lọc -> {target: blob}."""
+def _wincred_enumerate() -> dict[str, bytes]:
+    """Đọc TẤT CẢ mục trong Windows Credential Manager của user -> {target: blob}.
+
+    Dùng Filter=NULL + CRED_ENUMERATE_ALL_CREDENTIALS rồi lọc bằng Python, vì bộ lọc
+    wildcard của Windows chỉ hỗ trợ dạng 'tiền tố*'.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -135,15 +139,24 @@ def _wincred_enumerate(filter_: str) -> dict[str, bytes]:
                     ("TargetAlias", wintypes.LPWSTR), ("UserName", wintypes.LPWSTR)]
 
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    adv.CredEnumerateW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                                   ctypes.POINTER(ctypes.POINTER(ctypes.POINTER(CREDENTIALW)))]
+    adv.CredEnumerateW.restype = wintypes.BOOL
+    adv.CredFree.argtypes = [ctypes.c_void_p]
     count = wintypes.DWORD()
     pcreds = ctypes.POINTER(ctypes.POINTER(CREDENTIALW))()
-    if not adv.CredEnumerateW(filter_, 0, ctypes.byref(count), ctypes.byref(pcreds)):
-        return {}
+    if not adv.CredEnumerateW(None, 0x1, ctypes.byref(count), ctypes.byref(pcreds)):
+        if not adv.CredEnumerateW(None, 0, ctypes.byref(count), ctypes.byref(pcreds)):
+            return {}
     out = {}
     try:
         for i in range(count.value):
             c = pcreds[i].contents
-            out[c.TargetName or ""] = ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize)
+            key = c.TargetName or ""
+            if c.UserName and c.UserName not in key:
+                key = f"{key}|{c.UserName}"
+            blob = ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize) if c.CredentialBlobSize else b""
+            out[key] = blob
     finally:
         adv.CredFree(pcreds)
     return out
@@ -187,62 +200,129 @@ def assemble_secure_storage(entries: dict[str, str]) -> str | None:
     return None
 
 
+def _find_oauth(obj, depth: int = 0) -> dict | None:
+    """Tìm dict chứa accessToken (ưu tiên khóa claudeAiOauth), kể cả khi lồng sâu."""
+    if depth > 6:
+        return None
+    if isinstance(obj, dict):
+        o = obj.get("claudeAiOauth")
+        if isinstance(o, dict) and o.get("accessToken"):
+            return o
+        if isinstance(obj.get("accessToken"), str) and obj["accessToken"].startswith("sk-ant-o"):
+            return obj
+        for k, v in obj.items():
+            if k == "mcpOAuth":  # token của MCP server, không phải tài khoản Claude
+                continue
+            r = _find_oauth(v, depth + 1)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_oauth(v, depth + 1)
+            if r:
+                return r
+    return None
+
+
 def _oauth_from_text(text: str | None) -> dict | None:
     if not text:
         return None
     try:
-        d = json.loads(text)
+        return _find_oauth(json.loads(text.lstrip("\ufeff")))
     except ValueError:
         return None
-    if isinstance(d, dict):
-        if isinstance(d.get("claudeAiOauth"), dict):
-            return d["claudeAiOauth"]
-        if d.get("accessToken"):
-            return d
-    return None
+
+
+def credential_files() -> list[str]:
+    home = os.path.expanduser("~")
+    cands = [os.path.join(claude_dir(), ".credentials.json"),
+             os.path.join(home, ".claude", ".credentials.json"),
+             os.path.join(home, ".claude.json")]
+    out = []
+    for c in cands:
+        if c not in out:
+            out.append(c)
+    return out
 
 
 def read_credentials() -> tuple[dict | None, str]:
-    """Trả về (oauth, nguồn). Thứ tự: Windows Credential Manager, rồi file .credentials.json."""
+    """Trả về (oauth, nguồn). Thứ tự: Windows Credential Manager, rồi các file credentials."""
     if sys.platform == "win32":
         try:
-            raw = _wincred_enumerate(f"*{CRED_SERVICE_HINT}*")
-            cred = _oauth_from_text(assemble_secure_storage({k: _decode_blob(v) for k, v in raw.items()}))
+            raw = {k: _decode_blob(v) for k, v in _wincred_enumerate().items() if "claude" in k.lower()}
+            cred = _oauth_from_text(assemble_secure_storage(raw))
+            if not cred:  # dạng lưu khác: thử từng mục
+                for v in raw.values():
+                    cred = _oauth_from_text(v)
+                    if cred:
+                        break
             if cred:
-                return cred, "Credential Manager"
+                return cred, "Windows Credential Manager"
         except Exception:
             pass
-    path = os.path.join(claude_dir(), ".credentials.json")
-    try:
-        with open(path, encoding="utf-8") as f:
-            cred = _oauth_from_text(f.read())
+    for path in credential_files():
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                cred = _oauth_from_text(f.read())
             if cred:
                 return cred, path
-    except OSError:
-        pass
+        except OSError:
+            pass
     return None, ""
 
 
+def _skeleton(obj, depth: int = 0):
+    """Cấu trúc JSON đã che giá trị: chỉ giữ tên khóa, kiểu, độ dài (an toàn để gửi hỗ trợ)."""
+    if depth > 4:
+        return "…"
+    if isinstance(obj, dict):
+        return {k: _skeleton(v, depth + 1) for k, v in list(obj.items())[:40]}
+    if isinstance(obj, list):
+        return [f"list[{len(obj)}]"]
+    if isinstance(obj, str):
+        pre = obj[:10] if obj.startswith("sk-ant-") else ""
+        return f"str({len(obj)}){' ' + pre + '…' if pre else ''}"
+    return type(obj).__name__
+
+
 def diagnose() -> None:
-    """In thông tin chẩn đoán (không in token)."""
-    print("Thư mục Claude:", claude_dir())
+    """In thông tin chẩn đoán (KHÔNG in token)."""
+    print("Python:", sys.version.split()[0], "| Thư mục Claude:", claude_dir())
+    print("CLAUDE_CONFIG_DIR =", os.environ.get("CLAUDE_CONFIG_DIR"))
     if sys.platform == "win32":
-        raw = _wincred_enumerate("*")
-        hits = [t for t in raw if "claude" in t.lower()]
-        print(f"Credential Manager: {len(raw)} mục Generic, {len(hits)} mục liên quan Claude:")
+        raw = _wincred_enumerate()
+        hits = [t for t in raw if "claude" in t.lower() or "anthropic" in t.lower()]
+        print(f"\n[Credential Manager] tổng {len(raw)} mục, {len(hits)} mục Claude/Anthropic:")
         for t in hits:
             print("   ", t, f"({len(raw[t])} byte)")
-    p = os.path.join(claude_dir(), ".credentials.json")
-    print(".credentials.json:", "có" if os.path.exists(p) else "không có")
+    for p in credential_files():
+        print(f"\n[File] {p}: ", end="")
+        if not os.path.exists(p):
+            print("không có")
+            continue
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            bom = "có" if data.startswith(b"\xef\xbb\xbf") else "không"
+            print(f"{len(data)} byte, BOM={bom}")
+            try:
+                obj = json.loads(data.decode("utf-8-sig"))
+                print(json.dumps(_skeleton(obj), ensure_ascii=False, indent=1)[:2500])
+            except ValueError as e:
+                print("   Không phải JSON hợp lệ:", e, "| 12 byte đầu:", data[:12])
+        except OSError as e:
+            print("lỗi đọc:", e)
+    desk = os.path.join(os.environ.get("APPDATA", ""), "Claude")
+    print(f"\n[Claude Desktop] {desk}:", "có" if os.path.isdir(desk) else "không có")
     cred, src = read_credentials()
     if cred:
         exp = cred.get("expiresAt")
-        print("=> Đọc được token OAuth từ:", src, "| gói:", cred.get("subscriptionType"),
+        print("\n=> Đọc được token OAuth từ:", src, "| gói:", cred.get("subscriptionType"),
               "| hết hạn:", datetime.fromtimestamp(exp / 1000) if exp else "?")
         r = fetch_plan_usage()
         print("=> Gọi API usage:", r["error"] or f"OK, {len(r['limits'])} mục giới hạn")
     else:
-        print("=> Không tìm thấy token OAuth.")
+        print("\n=> Không tìm thấy token OAuth. Hãy chụp toàn bộ màn hình này gửi hỗ trợ.")
 
 
 def fetch_plan_usage() -> dict:
@@ -374,14 +454,10 @@ def net_bytes() -> tuple[int, int]:
 
 
 def fmt_rate(bps: float) -> str:
-    """bps: bit/giây."""
-    if bps >= 1e9:
-        return f"{bps / 1e9:.2f} Gbps"
-    if bps >= 1e6:
-        return f"{bps / 1e6:.1f} Mbps"
-    if bps >= 1e3:
-        return f"{bps / 1e3:.0f} kbps"
-    return f"{bps:.0f} bps"
+    """bps: byte/giây -> chuỗi kB/s (1 kB = 1000 byte), kiểu số Việt Nam: 1.234,5 kB/s."""
+    k = bps / 1000
+    txt = f"{k:,.1f}" if k < 100 else f"{k:,.0f}"
+    return txt.replace(",", "§").replace(".", ",").replace("§", ".") + " kB/s"
 
 
 def fmt_tok(n: int) -> str:
@@ -528,7 +604,7 @@ class Widget:
         c = self.chart
         c.delete("all")
         w, h = int(c.winfo_width()) or px(WIDTH - 24), px(46)
-        peak = max(max(self.down), max(self.up), 1e5)
+        peak = max(max(self.down), max(self.up), 12_500)
         step = w / (NET_HISTORY - 1)
         for series, color in ((self.down, C["down"]), (self.up, C["up"])):
             pts = []
@@ -547,7 +623,7 @@ class Widget:
         t, rx, tx = time.monotonic(), *net_bytes()
         pt, prx, ptx = self.prev
         dt = max(t - pt, 1e-3)
-        d_bps, u_bps = max(rx - prx, 0) * 8 / dt, max(tx - ptx, 0) * 8 / dt
+        d_bps, u_bps = max(rx - prx, 0) / dt, max(tx - ptx, 0) / dt
         self.prev = (t, rx, tx)
         self.down.append(d_bps)
         self.up.append(u_bps)

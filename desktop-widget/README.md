@@ -6,7 +6,7 @@ Widget nhỏ, không viền, nằm trên nền desktop, hiển thị:
 |---|---|---|---|
 | Giới hạn gói Pro/Max | % phiên 5 giờ, % tuần (tất cả model, Opus, Sonnet nếu có), giờ reset và thời gian còn lại | Endpoint OAuth mà Claude Code dùng cho lệnh `/usage` | 120 giây |
 | Claude Code | Token hôm nay, số lượt, token output, token 5 giờ qua, phân theo Opus/Sonnet/Haiku | Log cục bộ `%USERPROFILE%\.claude\projects\**\*.jsonl` | 30 giây |
-| Internet | Tốc độ ↓ download / ↑ upload (bps → Gbps) + biểu đồ 60 giây | `psutil` (bộ đếm byte của card mạng) | 1 giây |
+| Internet | Tốc độ ↓ download / ↑ upload (đơn vị kB/s, 1 kB = 1000 byte) + biểu đồ 60 giây | `psutil` (bộ đếm byte của card mạng) | 1 giây |
 
 Thanh % đổi màu: xanh < 60%, vàng 60–85%, đỏ ≥ 85%.
 
@@ -21,7 +21,7 @@ Thanh % đổi màu: xanh < 60%, vàng 60–85%, đỏ ≥ 85%.
 
 Chạy thủ công: `run_widget.bat`. Gỡ tự khởi động: `uninstall.bat`.
 
-Nếu widget báo không tìm thấy token: chạy `diagnose.bat`. Công cụ liệt kê các mục Claude trong Credential Manager, kiểm tra file credentials và thử gọi API (không in token ra màn hình).
+Nếu widget báo không tìm thấy token: chạy `diagnose.bat`. Công cụ liệt kê các mục Claude trong Credential Manager, in **cấu trúc** file credentials (chỉ tên khóa, kiểu, độ dài; đã che toàn bộ giá trị) và thử gọi API. Kết quả an toàn để chụp gửi hỗ trợ.
 
 ## Thao tác
 - Kéo chuột trái: di chuyển widget.
