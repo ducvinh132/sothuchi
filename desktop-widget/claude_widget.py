@@ -394,15 +394,85 @@ def find_claude_cli() -> str | None:
     return None
 
 
+def install_cli_from_npm() -> str | None:
+    """Cài Claude Code CLI bản Windows bằng Python (không cần PowerShell/Node):
+    tải gói chính thức @anthropic-ai/claude-code-win32-<arch> từ registry.npmjs.org,
+    kiểm tra SHA-512, giải nén claude.exe vào %USERPROFILE%\\.local\\bin."""
+    import base64
+    import hashlib
+    import platform
+    import tarfile
+    import tempfile
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    pkg = f"@anthropic-ai/claude-code-win32-{arch}"
+    ua = {"User-Agent": "claude-usage-widget/1.0"}
+    print(f"Lấy thông tin gói {pkg} từ registry.npmjs.org ...")
+    with urllib.request.urlopen(urllib.request.Request(
+            f"https://registry.npmjs.org/{pkg}/latest", headers=ua), timeout=30) as r:
+        meta = json.loads(r.read().decode("utf-8"))
+    url, integrity = meta["dist"]["tarball"], meta["dist"].get("integrity", "")
+    print(f"Phiên bản {meta['version']} – đang tải (~180 MB) ...")
+    h = hashlib.sha512()
+    fd, tmp = tempfile.mkstemp(suffix=".tgz")
+    try:
+        with os.fdopen(fd, "wb") as out, urllib.request.urlopen(
+                urllib.request.Request(url, headers=ua), timeout=60) as r:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = last = 0
+            while True:
+                buf = r.read(1 << 20)
+                if not buf:
+                    break
+                out.write(buf)
+                h.update(buf)
+                done += len(buf)
+                if total and done * 10 // total != last:
+                    last = done * 10 // total
+                    print(f"   {done / 1e6:.0f}/{total / 1e6:.0f} MB")
+        if integrity.startswith("sha512-") and base64.b64decode(integrity[7:]) != h.digest():
+            raise RuntimeError("Sai mã kiểm tra SHA-512 – hủy cài đặt")
+        print("   Đã kiểm tra SHA-512: khớp.")
+        dest_dir = os.path.join(os.path.expanduser("~"), ".local", "bin")
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, "claude.exe")
+        with tarfile.open(tmp, "r:gz") as t:
+            src = t.extractfile("package/claude.exe")
+            with open(dest + ".part", "wb") as f:
+                while True:
+                    buf = src.read(1 << 20)
+                    if not buf:
+                        break
+                    f.write(buf)
+        os.replace(dest + ".part", dest)
+        print("Đã cài Claude Code CLI vào:", dest)
+        return dest
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def login() -> None:
     """Đăng nhập Claude Code bằng tài khoản Pro/Max để widget đọc được usage."""
     import subprocess
     exe = find_claude_cli()
     if not exe:
-        print("Không thấy Claude Code CLI (kể cả bản kèm Claude Desktop). Cài bằng trình cài chính thức...")
-        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-                            "irm https://claude.ai/install.ps1 | iex"])
-        print("Mã kết thúc trình cài:", r.returncode)
+        print("Không thấy Claude Code CLI (kể cả bản kèm Claude Desktop).")
+        try:
+            exe = install_cli_from_npm()
+        except Exception as e:
+            print("   Tải từ npm thất bại:", e)
+        _cli_cache.clear()
+        exe = find_claude_cli()
+    if not exe:
+        print("Thử trình cài PowerShell chính thức (tối đa 5 phút)...")
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                                "irm https://claude.ai/install.ps1 | iex"], timeout=300)
+            print("Mã kết thúc trình cài:", r.returncode)
+        except (OSError, subprocess.SubprocessError) as e:
+            print("   PowerShell thất bại:", e)
         _cli_cache.clear()
         exe = find_claude_cli()
     if not exe:
