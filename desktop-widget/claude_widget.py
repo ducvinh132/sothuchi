@@ -42,7 +42,26 @@ USAGE_INTERVAL_S = 120          # chu kỳ gọi API giới hạn gói (không n
 LOG_INTERVAL_S = 30             # chu kỳ quét log Claude Code
 NET_INTERVAL_MS = 1000          # chu kỳ đo tốc độ mạng
 NET_HISTORY = 60                # số điểm biểu đồ (giây)
-WIDTH = 300
+WIDTH = 300                     # pixel logic (96 DPI), tự nhân theo DPI màn hình
+SC = 1.0                        # hệ số DPI, gán khi khởi tạo Tk
+
+
+def px(v: float) -> int:
+    return max(1, round(v * SC))
+
+
+def enable_dpi_awareness() -> None:
+    """Báo Windows rằng app tự vẽ theo DPI -> chữ và nét vẽ sắc, không bị phóng ảnh mờ."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 EXCLUDED_NIC_PREFIX = ("lo", "loopback", "vethernet", "vmware", "virtualbox",
                        "vbox", "docker", "wsl", "bluetooth", "teredo", "isatap")
@@ -95,20 +114,143 @@ def save_config(cfg: dict) -> None:
 # ----------------------------------------------------------------------------
 # 1. Giới hạn gói (OAuth usage)
 # ----------------------------------------------------------------------------
-def read_credentials() -> dict | None:
+CRED_SERVICE_HINT = "Claude Code"
+CRED_USER = "claude-code-user"
+
+
+def _wincred_enumerate(filter_: str) -> dict[str, bytes]:
+    """Đọc các mục Generic trong Windows Credential Manager khớp bộ lọc -> {target: blob}."""
+    import ctypes
+    from ctypes import wintypes
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("lo", wintypes.DWORD), ("hi", wintypes.DWORD)]
+
+    class CREDENTIALW(ctypes.Structure):
+        _fields_ = [("Flags", wintypes.DWORD), ("Type", wintypes.DWORD),
+                    ("TargetName", wintypes.LPWSTR), ("Comment", wintypes.LPWSTR),
+                    ("LastWritten", FILETIME), ("CredentialBlobSize", wintypes.DWORD),
+                    ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)), ("Persist", wintypes.DWORD),
+                    ("AttributeCount", wintypes.DWORD), ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", wintypes.LPWSTR), ("UserName", wintypes.LPWSTR)]
+
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    count = wintypes.DWORD()
+    pcreds = ctypes.POINTER(ctypes.POINTER(CREDENTIALW))()
+    if not adv.CredEnumerateW(filter_, 0, ctypes.byref(count), ctypes.byref(pcreds)):
+        return {}
+    out = {}
+    try:
+        for i in range(count.value):
+            c = pcreds[i].contents
+            out[c.TargetName or ""] = ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize)
+    finally:
+        adv.CredFree(pcreds)
+    return out
+
+
+def _decode_blob(b: bytes) -> str:
+    if len(b) >= 2 and b[1:2] == b"\x00":  # UTF-16LE
+        return b.decode("utf-16-le", "replace").rstrip("\x00")
+    return b.decode("utf-8", "replace").rstrip("\x00")
+
+
+def assemble_secure_storage(entries: dict[str, str]) -> str | None:
+    """Ghép dữ liệu Claude Code lưu trong Credential Manager.
+
+    Dữ liệu nhỏ: 1 mục '<...>claude-code-user'. Dữ liệu lớn: chia mảnh
+    '<...>claude-code-user#m' (JSON {n, l}) + '#0'..'#n-1' (base64).
+    Hàm nhóm theo tiền tố target nên không phụ thuộc định dạng 'service/name'.
+    """
+    import base64
+    groups: dict[str, dict[str, str]] = {}
+    for target, val in entries.items():
+        idx = target.rfind(CRED_USER)
+        if idx < 0:
+            continue
+        prefix, suffix = target[:idx], target[idx + len(CRED_USER):]
+        groups.setdefault(prefix, {})[suffix] = val
+    # ưu tiên service không có hậu tố hash (CLAUDE_CONFIG_DIR mặc định)
+    for prefix in sorted(groups, key=len):
+        g = groups[prefix]
+        meta = g.get("#m")
+        if meta:
+            try:
+                m = json.loads(meta)
+                data = "".join(g[f"#{i}"] for i in range(int(m["n"])))
+                if len(data) == int(m["l"]):
+                    return base64.b64decode(data).decode("utf-8")
+            except (ValueError, KeyError, TypeError):
+                pass
+        if g.get(""):
+            return g[""]
+    return None
+
+
+def _oauth_from_text(text: str | None) -> dict | None:
+    if not text:
+        return None
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(d, dict):
+        if isinstance(d.get("claudeAiOauth"), dict):
+            return d["claudeAiOauth"]
+        if d.get("accessToken"):
+            return d
+    return None
+
+
+def read_credentials() -> tuple[dict | None, str]:
+    """Trả về (oauth, nguồn). Thứ tự: Windows Credential Manager, rồi file .credentials.json."""
+    if sys.platform == "win32":
+        try:
+            raw = _wincred_enumerate(f"*{CRED_SERVICE_HINT}*")
+            cred = _oauth_from_text(assemble_secure_storage({k: _decode_blob(v) for k, v in raw.items()}))
+            if cred:
+                return cred, "Credential Manager"
+        except Exception:
+            pass
     path = os.path.join(claude_dir(), ".credentials.json")
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f).get("claudeAiOauth")
-    except (OSError, ValueError):
-        return None
+            cred = _oauth_from_text(f.read())
+            if cred:
+                return cred, path
+    except OSError:
+        pass
+    return None, ""
+
+
+def diagnose() -> None:
+    """In thông tin chẩn đoán (không in token)."""
+    print("Thư mục Claude:", claude_dir())
+    if sys.platform == "win32":
+        raw = _wincred_enumerate("*")
+        hits = [t for t in raw if "claude" in t.lower()]
+        print(f"Credential Manager: {len(raw)} mục Generic, {len(hits)} mục liên quan Claude:")
+        for t in hits:
+            print("   ", t, f"({len(raw[t])} byte)")
+    p = os.path.join(claude_dir(), ".credentials.json")
+    print(".credentials.json:", "có" if os.path.exists(p) else "không có")
+    cred, src = read_credentials()
+    if cred:
+        exp = cred.get("expiresAt")
+        print("=> Đọc được token OAuth từ:", src, "| gói:", cred.get("subscriptionType"),
+              "| hết hạn:", datetime.fromtimestamp(exp / 1000) if exp else "?")
+        r = fetch_plan_usage()
+        print("=> Gọi API usage:", r["error"] or f"OK, {len(r['limits'])} mục giới hạn")
+    else:
+        print("=> Không tìm thấy token OAuth.")
 
 
 def fetch_plan_usage() -> dict:
     """Trả về {'plan': str, 'limits': [(key, label, pct, resets_at)], 'error': str|None}."""
-    cred = read_credentials()
+    cred, _src = read_credentials()
     if not cred or not cred.get("accessToken"):
-        return {"plan": "", "limits": [], "error": "Chưa đăng nhập Claude Code (chạy 'claude' rồi /login)"}
+        return {"plan": "", "limits": [], "error": "Không tìm thấy token Claude Code (đăng nhập bằng tài khoản "
+                "Pro/Max qua lệnh /login; chẩn đoán: chạy diagnose.bat)"}
     plan = (cred.get("subscriptionType") or "").capitalize()
     exp = cred.get("expiresAt")
     if exp and exp / 1000 < time.time():
@@ -286,17 +428,20 @@ class Widget:
         self.plan_data = None
         self.last_plan_ok = None
 
+        global SC
+        enable_dpi_awareness()
         r = self.root = tk.Tk()
+        SC = r.winfo_fpixels("1i") / 96.0
         r.title("Claude Widget")
         r.overrideredirect(True)  # không viền, không hiện trên taskbar
         r.configure(bg=C["bg"])
         r.attributes("-alpha", self.cfg["alpha"])
         r.attributes("-topmost", self.cfg["topmost"])
-        x = self.cfg["x"] if self.cfg["x"] is not None else r.winfo_screenwidth() - WIDTH - 24
-        y = self.cfg["y"] if self.cfg["y"] is not None else 40
-        r.geometry(f"{WIDTH}x10+{x}+{y}")
+        x = self.cfg["x"] if self.cfg["x"] is not None else r.winfo_screenwidth() - px(WIDTH) - px(24)
+        y = self.cfg["y"] if self.cfg["y"] is not None else px(40)
+        r.geometry(f"{px(WIDTH)}x10+{x}+{y}")
 
-        self.frame = tk.Frame(r, bg=C["bg"], padx=12, pady=10)
+        self.frame = tk.Frame(r, bg=C["bg"], padx=px(12), pady=px(10))
         self.frame.pack(fill="both", expand=True)
         self._build()
         self._bind_drag(r)
@@ -324,28 +469,28 @@ class Widget:
         self.clock_lbl.pack(side="right")
 
         self.plan_box = tk.Frame(f, bg=C["bg"])
-        self.plan_box.pack(fill="x", pady=(6, 0))
+        self.plan_box.pack(fill="x", pady=(px(6), 0))
         self._lbl(self.plan_box, "Đang tải giới hạn gói…", 8, "muted").pack(anchor="w")
 
-        tk.Frame(f, bg=C["track"], height=1).pack(fill="x", pady=8)
+        tk.Frame(f, bg=C["track"], height=px(1)).pack(fill="x", pady=px(8))
         self._lbl(f, "CLAUDE CODE (log máy này)", 7, "muted", bold=True).pack(anchor="w")
         self.log_lbl = self._lbl(f, "Đang quét log…", 9, justify="left")
-        self.log_lbl.pack(anchor="w", pady=(2, 0))
+        self.log_lbl.pack(anchor="w", pady=(px(2), 0))
         self.model_lbl = self._lbl(f, "", 8, "muted")
         self.model_lbl.pack(anchor="w")
 
-        tk.Frame(f, bg=C["track"], height=1).pack(fill="x", pady=8)
+        tk.Frame(f, bg=C["track"], height=px(1)).pack(fill="x", pady=px(8))
         self._lbl(f, "INTERNET", 7, "muted", bold=True).pack(anchor="w")
         row = tk.Frame(f, bg=C["bg"])
-        row.pack(fill="x", pady=(2, 4))
+        row.pack(fill="x", pady=(px(2), px(4)))
         self.down_lbl = self._lbl(row, "↓ –", 12, "down", bold=True)
         self.down_lbl.pack(side="left")
         self.up_lbl = self._lbl(row, "↑ –", 12, "up", bold=True)
         self.up_lbl.pack(side="right")
-        self.chart = tk.Canvas(f, width=WIDTH - 24, height=46, bg=C["panel"], highlightthickness=0)
+        self.chart = tk.Canvas(f, width=px(WIDTH - 24), height=px(46), bg=C["panel"], highlightthickness=0)
         self.chart.pack(fill="x")
         self.peak_lbl = self._lbl(f, "", 7, "muted")
-        self.peak_lbl.pack(anchor="w", pady=(2, 0))
+        self.peak_lbl.pack(anchor="w", pady=(px(2), 0))
 
     def _render_plan(self) -> None:
         for w in self.plan_box.winfo_children():
@@ -353,18 +498,18 @@ class Widget:
         d = self.plan_data
         self.title_lbl.config(text=f" Claude {d['plan']}".rstrip())
         if d["error"]:
-            self._lbl(self.plan_box, "⚠ " + d["error"], 8, "warn", wraplength=WIDTH - 30,
+            self._lbl(self.plan_box, "⚠ " + d["error"], 8, "warn", wraplength=px(WIDTH - 30),
                       justify="left").pack(anchor="w")
         for _key, label, pct, resets in d["limits"]:
             top = tk.Frame(self.plan_box, bg=C["bg"])
-            top.pack(fill="x", pady=(4, 1))
+            top.pack(fill="x", pady=(px(4), px(1)))
             self._lbl(top, label, 9).pack(side="left")
             self._lbl(top, f"{pct:.0f}%", 9, bold=True).pack(side="right")
-            bar = tk.Canvas(self.plan_box, height=6, bg=C["track"], highlightthickness=0)
+            bar = tk.Canvas(self.plan_box, height=px(6), bg=C["track"], highlightthickness=0)
             bar.pack(fill="x")
             bar.update_idletasks()
-            w = max(bar.winfo_width(), WIDTH - 24)
-            bar.create_rectangle(0, 0, w * min(pct, 100) / 100, 6, fill=level_color(pct), width=0)
+            w = max(bar.winfo_width(), px(WIDTH - 24))
+            bar.create_rectangle(0, 0, w * min(pct, 100) / 100, px(6), fill=level_color(pct), width=0)
             if resets:
                 self._lbl(self.plan_box, fmt_reset(resets), 7, "muted").pack(anchor="w")
         if self.last_plan_ok:
@@ -382,20 +527,20 @@ class Widget:
     def _draw_chart(self) -> None:
         c = self.chart
         c.delete("all")
-        w, h = int(c.winfo_width()) or WIDTH - 24, 46
+        w, h = int(c.winfo_width()) or px(WIDTH - 24), px(46)
         peak = max(max(self.down), max(self.up), 1e5)
         step = w / (NET_HISTORY - 1)
         for series, color in ((self.down, C["down"]), (self.up, C["up"])):
             pts = []
             for i, v in enumerate(series):
-                pts += [i * step, h - 3 - (h - 6) * v / peak]
-            c.create_line(*pts, fill=color, width=1.5, smooth=True)
+                pts += [i * step, h - px(3) - (h - px(6)) * v / peak]
+            c.create_line(*pts, fill=color, width=max(1.5, 1.6 * SC), smooth=True)
         self.peak_lbl.config(text=f"60 giây · thang đo đỉnh {fmt_rate(peak)}")
 
     def _fit(self) -> None:
         self.root.update_idletasks()
         h = self.frame.winfo_reqheight()
-        self.root.geometry(f"{WIDTH}x{h}+{self.root.winfo_x()}+{self.root.winfo_y()}")
+        self.root.geometry(f"{px(WIDTH)}x{h}+{self.root.winfo_x()}+{self.root.winfo_y()}")
 
     # --- vòng lặp ------------------------------------------------------------
     def tick_net(self) -> None:
@@ -524,7 +669,9 @@ def uninstall_startup() -> None:
 
 
 if __name__ == "__main__":
-    if "--install-startup" in sys.argv:
+    if "--diagnose" in sys.argv:
+        diagnose()
+    elif "--install-startup" in sys.argv:
         install_startup()
     elif "--uninstall-startup" in sys.argv:
         uninstall_startup()

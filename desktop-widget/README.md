@@ -12,7 +12,7 @@ Thanh % đổi màu: xanh < 60%, vàng 60–85%, đỏ ≥ 85%.
 
 ## Yêu cầu
 1. Python 3.9+ cho Windows (https://www.python.org/downloads/windows/), khi cài tích **Add python.exe to PATH**.
-2. Claude Code đã cài và đã đăng nhập bằng tài khoản Pro/Max (`claude` → `/login`). Widget đọc token tại `%USERPROFILE%\.claude\.credentials.json`.
+2. Claude Code đã cài và đã đăng nhập bằng tài khoản Pro/Max (`claude` → `/login`). Widget tự tìm token theo thứ tự: **Windows Credential Manager** (nơi Claude Code bản mới lưu, mục `Claude Code-credentials`), sau đó file `%USERPROFILE%\.claude\.credentials.json` (bản cũ).
 
 ## Cài đặt
 1. Tải thư mục `desktop-widget` về máy (ví dụ `D:\Tools\desktop-widget`).
@@ -21,6 +21,8 @@ Thanh % đổi màu: xanh < 60%, vàng 60–85%, đỏ ≥ 85%.
 
 Chạy thủ công: `run_widget.bat`. Gỡ tự khởi động: `uninstall.bat`.
 
+Nếu widget báo không tìm thấy token: chạy `diagnose.bat`. Công cụ liệt kê các mục Claude trong Credential Manager, kiểm tra file credentials và thử gọi API (không in token ra màn hình).
+
 ## Thao tác
 - Kéo chuột trái: di chuyển widget.
 - Chuột phải: Làm mới ngay, Luôn nổi trên cùng, Độ trong suốt (100/92/80/65%), Thoát.
@@ -28,6 +30,9 @@ Chạy thủ công: `run_widget.bat`. Gỡ tự khởi động: `uninstall.bat`.
 
 ## Đóng gói thành .exe (tùy chọn)
 Chạy `build_exe.bat` → `dist\ClaudeWidget.exe` (không cần Python trên máy đích). Để tự khởi động bản exe: Win+R → `shell:startup` → tạo shortcut tới file exe trong thư mục đó.
+
+## Hiển thị sắc nét
+Widget khai báo Per-Monitor DPI Aware với Windows và tự nhân kích thước theo hệ số Scale (125%, 150%, 200%…), nên chữ và nét vẽ không bị Windows phóng ảnh gây mờ/rỗ.
 
 ## Lưu ý quan trọng
 - Endpoint `api.anthropic.com/api/oauth/usage` **không phải API công khai có tài liệu**; Anthropic có thể thay đổi bất kỳ lúc nào. Khi đó khối giới hạn gói sẽ báo lỗi, hai khối còn lại vẫn chạy.
